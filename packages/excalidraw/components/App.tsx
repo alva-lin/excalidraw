@@ -49,6 +49,7 @@ import {
 import type { PastedMixedContent } from "../clipboard";
 import { copyTextToSystemClipboard, parseClipboard } from "../clipboard";
 import type { EXPORT_IMAGE_TYPES } from "../constants";
+import { DEFAULT_FONT_SIZE } from "../constants";
 import {
   APP_NAME,
   CURSOR_TYPE,
@@ -88,6 +89,7 @@ import {
   isIOS,
   supportsResizeObserver,
   DEFAULT_COLLISION_THRESHOLD,
+  DEFAULT_TEXT_ALIGN,
 } from "../constants";
 import type { ExportedElements } from "../data";
 import { exportCanvas, loadFromBlob } from "../data";
@@ -114,7 +116,7 @@ import {
   newTextElement,
   newImageElement,
   transformElements,
-  updateTextElement,
+  refreshTextDimensions,
   redrawTextBoundingBox,
   getElementAbsoluteCoords,
 } from "../element";
@@ -329,8 +331,11 @@ import {
   getContainerElement,
   getDefaultLineHeight,
   getLineHeightInPx,
+  getMinTextElementWidth,
   isMeasureTextSupported,
   isValidTextContainer,
+  measureText,
+  wrapText,
 } from "../element/textElement";
 import {
   showHyperlinkTooltip,
@@ -429,6 +434,9 @@ import {
   isPointHittingLinkIcon,
 } from "./hyperlink/helpers";
 import { getShortcutFromShortcutName } from "../actions/shortcuts";
+import { actionTextAutoResize } from "../actions/actionTextAutoResize";
+import { getVisibleSceneBounds } from "../element/bounds";
+import { isMaybeMermaidDefinition } from "../mermaid";
 
 const AppContext = React.createContext<AppClassProperties>(null!);
 const AppPropsContext = React.createContext<AppProps>(null!);
@@ -1691,6 +1699,7 @@ class App extends React.Component<AppProps, AppState> {
                           canvas={this.interactiveCanvas}
                           elementsMap={elementsMap}
                           visibleElements={visibleElements}
+                          allElementsMap={allElementsMap}
                           selectedElements={selectedElements}
                           sceneNonce={sceneNonce}
                           selectionNonce={
@@ -2126,95 +2135,96 @@ class App extends React.Component<AppProps, AppState> {
     });
   };
 
-  private syncActionResult = withBatchedUpdates(
-    (actionResult: ActionResult) => {
-      if (this.unmounted || actionResult === false) {
-        return;
+  public syncActionResult = withBatchedUpdates((actionResult: ActionResult) => {
+    if (this.unmounted || actionResult === false) {
+      return;
+    }
+
+    if (actionResult.storeAction === StoreAction.UPDATE) {
+      this.store.shouldUpdateSnapshot();
+    } else if (actionResult.storeAction === StoreAction.CAPTURE) {
+      this.store.shouldCaptureIncrement();
+    }
+
+    let didUpdate = false;
+
+    let editingElement: AppState["editingElement"] | null = null;
+    if (actionResult.elements) {
+      actionResult.elements.forEach((element) => {
+        if (
+          this.state.editingElement?.id === element.id &&
+          this.state.editingElement !== element &&
+          isNonDeletedElement(element)
+        ) {
+          editingElement = element;
+        }
+      });
+
+      this.scene.replaceAllElements(actionResult.elements);
+      didUpdate = true;
+    }
+
+    if (actionResult.files) {
+      this.files = actionResult.replaceFiles
+        ? actionResult.files
+        : { ...this.files, ...actionResult.files };
+      this.addNewImagesToImageCache();
+    }
+
+    if (actionResult.appState || editingElement || this.state.contextMenu) {
+      let viewModeEnabled = actionResult?.appState?.viewModeEnabled || false;
+      let zenModeEnabled = actionResult?.appState?.zenModeEnabled || false;
+      let gridSize = actionResult?.appState?.gridSize || null;
+      const theme =
+        actionResult?.appState?.theme || this.props.theme || THEME.LIGHT;
+      const name = actionResult?.appState?.name ?? this.state.name;
+      const errorMessage =
+        actionResult?.appState?.errorMessage ?? this.state.errorMessage;
+      if (typeof this.props.viewModeEnabled !== "undefined") {
+        viewModeEnabled = this.props.viewModeEnabled;
       }
 
-      let editingElement: AppState["editingElement"] | null = null;
-      if (actionResult.elements) {
-        actionResult.elements.forEach((element) => {
-          if (
-            this.state.editingElement?.id === element.id &&
-            this.state.editingElement !== element &&
-            isNonDeletedElement(element)
-          ) {
-            editingElement = element;
-          }
+      if (typeof this.props.zenModeEnabled !== "undefined") {
+        zenModeEnabled = this.props.zenModeEnabled;
+      }
+
+      if (typeof this.props.gridModeEnabled !== "undefined") {
+        gridSize = this.props.gridModeEnabled ? GRID_SIZE : null;
+      }
+
+      editingElement =
+        editingElement || actionResult.appState?.editingElement || null;
+
+      if (editingElement?.isDeleted) {
+        editingElement = null;
+      }
+
+      this.setState((state) => {
+        // using Object.assign instead of spread to fool TS 4.2.2+ into
+        // regarding the resulting type as not containing undefined
+        // (which the following expression will never contain)
+        return Object.assign(actionResult.appState || {}, {
+          // NOTE this will prevent opening context menu using an action
+          // or programmatically from the host, so it will need to be
+          // rewritten later
+          contextMenu: null,
+          editingElement,
+          viewModeEnabled,
+          zenModeEnabled,
+          gridSize,
+          theme,
+          name,
+          errorMessage,
         });
+      });
 
-        if (actionResult.storeAction === StoreAction.UPDATE) {
-          this.store.shouldUpdateSnapshot();
-        } else if (actionResult.storeAction === StoreAction.CAPTURE) {
-          this.store.shouldCaptureIncrement();
-        }
+      didUpdate = true;
+    }
 
-        this.scene.replaceAllElements(actionResult.elements);
-      }
-
-      if (actionResult.files) {
-        this.files = actionResult.replaceFiles
-          ? actionResult.files
-          : { ...this.files, ...actionResult.files };
-        this.addNewImagesToImageCache();
-      }
-
-      if (actionResult.appState || editingElement || this.state.contextMenu) {
-        if (actionResult.storeAction === StoreAction.UPDATE) {
-          this.store.shouldUpdateSnapshot();
-        } else if (actionResult.storeAction === StoreAction.CAPTURE) {
-          this.store.shouldCaptureIncrement();
-        }
-
-        let viewModeEnabled = actionResult?.appState?.viewModeEnabled || false;
-        let zenModeEnabled = actionResult?.appState?.zenModeEnabled || false;
-        let gridSize = actionResult?.appState?.gridSize || null;
-        const theme =
-          actionResult?.appState?.theme || this.props.theme || THEME.LIGHT;
-        const name = actionResult?.appState?.name ?? this.state.name;
-        const errorMessage =
-          actionResult?.appState?.errorMessage ?? this.state.errorMessage;
-        if (typeof this.props.viewModeEnabled !== "undefined") {
-          viewModeEnabled = this.props.viewModeEnabled;
-        }
-
-        if (typeof this.props.zenModeEnabled !== "undefined") {
-          zenModeEnabled = this.props.zenModeEnabled;
-        }
-
-        if (typeof this.props.gridModeEnabled !== "undefined") {
-          gridSize = this.props.gridModeEnabled ? GRID_SIZE : null;
-        }
-
-        editingElement =
-          editingElement || actionResult.appState?.editingElement || null;
-
-        if (editingElement?.isDeleted) {
-          editingElement = null;
-        }
-
-        this.setState((state) => {
-          // using Object.assign instead of spread to fool TS 4.2.2+ into
-          // regarding the resulting type as not containing undefined
-          // (which the following expression will never contain)
-          return Object.assign(actionResult.appState || {}, {
-            // NOTE this will prevent opening context menu using an action
-            // or programmatically from the host, so it will need to be
-            // rewritten later
-            contextMenu: null,
-            editingElement,
-            viewModeEnabled,
-            zenModeEnabled,
-            gridSize,
-            theme,
-            name,
-            errorMessage,
-          });
-        });
-      }
-    },
-  );
+    if (!didUpdate && actionResult.storeAction !== StoreAction.NONE) {
+      this.scene.triggerUpdate();
+    }
+  });
 
   // Lifecycle
 
@@ -2281,7 +2291,11 @@ class App extends React.Component<AppProps, AppState> {
     }
     let initialData = null;
     try {
-      initialData = (await this.props.initialData) || null;
+      if (typeof this.props.initialData === "function") {
+        initialData = (await this.props.initialData()) || null;
+      } else {
+        initialData = (await this.props.initialData) || null;
+      }
       if (initialData?.libraryItems) {
         this.library
           .updateLibrary({
@@ -2564,7 +2578,7 @@ class App extends React.Component<AppProps, AppState> {
       addEventListener(document, EVENT.KEYUP, this.onKeyUp, { passive: true }),
       addEventListener(
         document,
-        EVENT.MOUSE_MOVE,
+        EVENT.POINTER_MOVE,
         this.updateCurrentCursorPosition,
       ),
       // rerender text elements on font load to fix #637 && #1553
@@ -2593,6 +2607,9 @@ class App extends React.Component<AppProps, AppState> {
       ),
       addEventListener(window, EVENT.FOCUS, () => {
         this.maybeCleanupAfterMissingPointerUp(null);
+        // browsers (chrome?) tend to free up memory a lot, which results
+        // in canvas context being cleared. Thus re-render on focus.
+        this.triggerRender(true);
       }),
     );
 
@@ -3040,6 +3057,33 @@ class App extends React.Component<AppProps, AppState> {
           retainSeed: isPlainPaste,
         });
       } else if (data.text) {
+        if (data.text && isMaybeMermaidDefinition(data.text)) {
+          const api = await import("@excalidraw/mermaid-to-excalidraw");
+
+          try {
+            const { elements: skeletonElements, files } =
+              await api.parseMermaidToExcalidraw(data.text, {
+                fontSize: DEFAULT_FONT_SIZE,
+              });
+
+            const elements = convertToExcalidrawElements(skeletonElements, {
+              regenerateIds: true,
+            });
+
+            this.addElementsFromPasteOrLibrary({
+              elements,
+              files,
+              position: "cursor",
+            });
+
+            return;
+          } catch (err: any) {
+            console.warn(
+              `parsing pasted text as mermaid definition failed: ${err.message}`,
+            );
+          }
+        }
+
         const nonEmptyLines = normalizeEOL(data.text)
           .split(/\n+/)
           .map((s) => s.trim())
@@ -3337,32 +3381,53 @@ class App extends React.Component<AppProps, AppState> {
       text,
       fontSize: this.state.currentItemFontSize,
       fontFamily: this.state.currentItemFontFamily,
-      textAlign: this.state.currentItemTextAlign,
+      textAlign: DEFAULT_TEXT_ALIGN,
       verticalAlign: DEFAULT_VERTICAL_ALIGN,
       locked: false,
     };
-
+    const fontString = getFontString({
+      fontSize: textElementProps.fontSize,
+      fontFamily: textElementProps.fontFamily,
+    });
+    const lineHeight = getDefaultLineHeight(textElementProps.fontFamily);
+    const [x1, , x2] = getVisibleSceneBounds(this.state);
+    // long texts should not go beyond 800 pixels in width nor should it go below 200 px
+    const maxTextWidth = Math.max(Math.min((x2 - x1) * 0.5, 800), 200);
     const LINE_GAP = 10;
     let currentY = y;
 
     const lines = isPlainPaste ? [text] : text.split("\n");
     const textElements = lines.reduce(
       (acc: ExcalidrawTextElement[], line, idx) => {
-        const text = line.trim();
-
-        const lineHeight = getDefaultLineHeight(textElementProps.fontFamily);
-        if (text.length) {
+        const originalText = line.trim();
+        if (originalText.length) {
           const topLayerFrame = this.getTopLayerFrameAtSceneCoords({
             x,
             y: currentY,
           });
 
+          let metrics = measureText(originalText, fontString, lineHeight);
+          const isTextWrapped = metrics.width > maxTextWidth;
+
+          const text = isTextWrapped
+            ? wrapText(originalText, fontString, maxTextWidth)
+            : originalText;
+
+          metrics = isTextWrapped
+            ? measureText(text, fontString, lineHeight)
+            : metrics;
+
+          const startX = x - metrics.width / 2;
+          const startY = currentY - metrics.height / 2;
+
           const element = newTextElement({
             ...textElementProps,
-            x,
-            y: currentY,
+            x: startX,
+            y: startY,
             text,
+            originalText,
             lineHeight,
+            autoResize: !isTextWrapped,
             frameId: topLayerFrame ? topLayerFrame.id : null,
           });
           acc.push(element);
@@ -3679,7 +3744,7 @@ class App extends React.Component<AppProps, AppState> {
       elements?: SceneData["elements"];
       appState?: Pick<AppState, K> | null;
       collaborators?: SceneData["collaborators"];
-      /** @default StoreAction.CAPTURE */
+      /** @default StoreAction.NONE */
       storeAction?: SceneData["storeAction"];
     }) => {
       const nextElements = syncInvalidIndices(sceneData.elements ?? []);
@@ -3728,8 +3793,15 @@ class App extends React.Component<AppProps, AppState> {
     },
   );
 
-  private triggerRender = () => {
-    this.setState({});
+  private triggerRender = (
+    /** force always re-renders canvas even if no change */
+    force?: boolean,
+  ) => {
+    if (force === true) {
+      this.scene.triggerUpdate();
+    } else {
+      this.setState({});
+    }
   };
 
   /**
@@ -4298,25 +4370,22 @@ class App extends React.Component<AppProps, AppState> {
   ) {
     const elementsMap = this.scene.getElementsMapIncludingDeleted();
 
-    const updateElement = (
-      text: string,
-      originalText: string,
-      isDeleted: boolean,
-    ) => {
+    const updateElement = (nextOriginalText: string, isDeleted: boolean) => {
       this.scene.replaceAllElements([
         // Not sure why we include deleted elements as well hence using deleted elements map
         ...this.scene.getElementsIncludingDeleted().map((_element) => {
           if (_element.id === element.id && isTextElement(_element)) {
-            return updateTextElement(
-              _element,
-              getContainerElement(_element, elementsMap),
-              elementsMap,
-              {
-                text,
-                isDeleted,
-                originalText,
-              },
-            );
+            return newElementWith(_element, {
+              originalText: nextOriginalText,
+              isDeleted: isDeleted ?? _element.isDeleted,
+              // returns (wrapped) text and new dimensions
+              ...refreshTextDimensions(
+                _element,
+                getContainerElement(_element, elementsMap),
+                elementsMap,
+                nextOriginalText,
+              ),
+            });
           }
           return _element;
         }),
@@ -4339,15 +4408,15 @@ class App extends React.Component<AppProps, AppState> {
           viewportY - this.state.offsetTop,
         ];
       },
-      onChange: withBatchedUpdates((text) => {
-        updateElement(text, text, false);
+      onChange: withBatchedUpdates((nextOriginalText) => {
+        updateElement(nextOriginalText, false);
         if (isNonDeletedElement(element)) {
           updateBoundElements(element, elementsMap);
         }
       }),
-      onSubmit: withBatchedUpdates(({ text, viaKeyboard, originalText }) => {
-        const isDeleted = !text.trim();
-        updateElement(text, originalText, isDeleted);
+      onSubmit: withBatchedUpdates(({ viaKeyboard, nextOriginalText }) => {
+        const isDeleted = !nextOriginalText.trim();
+        updateElement(nextOriginalText, isDeleted);
         // select the created text element only if submitting via keyboard
         // (when submitting via click it should act as signal to deselect)
         if (!isDeleted && viaKeyboard) {
@@ -4386,13 +4455,18 @@ class App extends React.Component<AppProps, AppState> {
       element,
       excalidrawContainer: this.excalidrawContainerRef.current,
       app: this,
+      // when text is selected, it's hard (at least on iOS) to re-position the
+      // caret (i.e. deselect). There's not much use for always selecting
+      // the text on edit anyway (and users can select-all from contextmenu
+      // if needed)
+      autoSelect: !this.device.isTouchScreen,
     });
     // deselect all other elements when inserting text
     this.deselectElements();
 
     // do an initial update to re-initialize element position since we were
     // modifying element's x/y for sake of editor (case: syncing to remote)
-    updateElement(element.text, element.originalText, false);
+    updateElement(element.originalText, false);
   }
 
   private deselectElements() {
@@ -4685,6 +4759,7 @@ class App extends React.Component<AppProps, AppState> {
     sceneY,
     insertAtParentCenter = true,
     container,
+    autoEdit = true,
   }: {
     /** X position to insert text at */
     sceneX: number;
@@ -4693,6 +4768,7 @@ class App extends React.Component<AppProps, AppState> {
     /** whether to attempt to insert at element center if applicable */
     insertAtParentCenter?: boolean;
     container?: ExcalidrawTextContainer | null;
+    autoEdit?: boolean;
   }) => {
     let shouldBindToContainer = false;
 
@@ -4825,13 +4901,16 @@ class App extends React.Component<AppProps, AppState> {
       }
     }
 
-    this.setState({
-      editingElement: element,
-    });
-
-    this.handleTextWysiwyg(element, {
-      isExistingElement: !!existingTextElement,
-    });
+    if (autoEdit || existingTextElement || container) {
+      this.handleTextWysiwyg(element, {
+        isExistingElement: !!existingTextElement,
+      });
+    } else {
+      this.setState({
+        draggingElement: element,
+        multiElement: null,
+      });
+    }
   };
 
   private handleCanvasDoubleClick = (
@@ -5099,8 +5178,11 @@ class App extends React.Component<AppProps, AppState> {
 
         this.translateCanvas({
           zoom: zoomState.zoom,
-          scrollX: zoomState.scrollX + deltaX / nextZoom,
-          scrollY: zoomState.scrollY + deltaY / nextZoom,
+          // 2x multiplier is just a magic number that makes this work correctly
+          // on touchscreen devices (note: if we get report that panning is slower/faster
+          // than actual movement, consider swapping with devicePixelRatio)
+          scrollX: zoomState.scrollX + 2 * (deltaX / nextZoom),
+          scrollY: zoomState.scrollY + 2 * (deltaY / nextZoom),
           shouldCacheIgnoreZoom: true,
         });
       });
@@ -5863,7 +5945,6 @@ class App extends React.Component<AppProps, AppState> {
 
     if (this.state.activeTool.type === "text") {
       this.handleTextOnPointerDown(event, pointerDownState);
-      return;
     } else if (
       this.state.activeTool.type === "arrow" ||
       this.state.activeTool.type === "line"
@@ -5984,6 +6065,7 @@ class App extends React.Component<AppProps, AppState> {
     );
     const clicklength =
       event.timeStamp - (this.lastPointerDownEvent?.timeStamp ?? 0);
+
     if (this.device.editor.isMobile && clicklength < 300) {
       const hitElement = this.getElementAtPosition(
         scenePointer.x,
@@ -6657,6 +6739,7 @@ class App extends React.Component<AppProps, AppState> {
       sceneY,
       insertAtParentCenter: !event.altKey,
       container,
+      autoEdit: false,
     });
 
     resetCursor(this.interactiveCanvas);
@@ -8005,6 +8088,28 @@ class App extends React.Component<AppProps, AppState> {
           }
         }
         return;
+      }
+
+      if (isTextElement(draggingElement)) {
+        const minWidth = getMinTextElementWidth(
+          getFontString({
+            fontSize: draggingElement.fontSize,
+            fontFamily: draggingElement.fontFamily,
+          }),
+          draggingElement.lineHeight,
+        );
+
+        if (draggingElement.width < minWidth) {
+          mutateElement(draggingElement, {
+            autoResize: true,
+          });
+        }
+
+        this.resetCursor();
+
+        this.handleTextWysiwyg(draggingElement, {
+          isExistingElement: true,
+        });
       }
 
       if (
@@ -9374,6 +9479,7 @@ class App extends React.Component<AppProps, AppState> {
         distance(pointerDownState.origin.y, pointerCoords.y),
         shouldMaintainAspectRatio(event),
         shouldResizeFromCenter(event),
+        this.state.zoom.value,
       );
     } else {
       let [gridX, gridY] = getGridPoint(
@@ -9431,6 +9537,7 @@ class App extends React.Component<AppProps, AppState> {
           ? !shouldMaintainAspectRatio(event)
           : shouldMaintainAspectRatio(event),
         shouldResizeFromCenter(event),
+        this.state.zoom.value,
         aspectRatio,
         this.state.originSnapOffset,
       );
@@ -9631,6 +9738,7 @@ class App extends React.Component<AppProps, AppState> {
     }
 
     return [
+      CONTEXT_MENU_SEPARATOR,
       actionCut,
       actionCopy,
       actionPaste,
@@ -9643,6 +9751,7 @@ class App extends React.Component<AppProps, AppState> {
       actionPasteStyles,
       CONTEXT_MENU_SEPARATOR,
       actionGroup,
+      actionTextAutoResize,
       actionUnbindText,
       actionBindText,
       actionWrapTextInContainer,
