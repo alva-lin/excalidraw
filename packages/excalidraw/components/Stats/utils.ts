@@ -1,4 +1,7 @@
-import { updateBoundElements } from "../../element/binding";
+import {
+  bindOrUnbindLinearElements,
+  updateBoundElements,
+} from "../../element/binding";
 import { mutateElement } from "../../element/mutateElement";
 import {
   measureFontSizeFromWidth,
@@ -11,11 +14,16 @@ import {
   getBoundTextMaxWidth,
   handleBindTextResize,
 } from "../../element/textElement";
-import { isFrameLikeElement, isTextElement } from "../../element/typeChecks";
+import {
+  isFrameLikeElement,
+  isLinearElement,
+  isTextElement,
+} from "../../element/typeChecks";
 import type {
   ElementsMap,
   ExcalidrawElement,
   NonDeletedExcalidrawElement,
+  NonDeletedSceneElementsMap,
 } from "../../element/types";
 import {
   getSelectedGroupIds,
@@ -23,6 +31,7 @@ import {
   isInGroup,
 } from "../../groups";
 import { rotate } from "../../math";
+import type Scene from "../../scene/Scene";
 import type { AppState } from "../../types";
 import { getFontString } from "../../utils";
 
@@ -32,7 +41,8 @@ export type StatsInputProperty =
   | "width"
   | "height"
   | "angle"
-  | "fontSize";
+  | "fontSize"
+  | "gridStep";
 
 export const SMALLEST_DELTA = 0.01;
 
@@ -115,7 +125,9 @@ export const resizeElement = (
   nextHeight: number,
   keepAspectRatio: boolean,
   origElement: ExcalidrawElement,
-  elementsMap: ElementsMap,
+  elementsMap: NonDeletedSceneElementsMap,
+  elements: readonly NonDeletedExcalidrawElement[],
+  scene: Scene,
   shouldInformMutation = true,
 ) => {
   const latestElement = elementsMap.get(origElement.id);
@@ -138,6 +150,8 @@ export const resizeElement = (
     nextHeight = Math.max(nextHeight, minHeight);
   }
 
+  const { width: oldWidth, height: oldHeight } = latestElement;
+
   mutateElement(
     latestElement,
     {
@@ -156,6 +170,12 @@ export const resizeElement = (
     },
     shouldInformMutation,
   );
+  updateBindings(latestElement, elementsMap, elements, scene, {
+    newSize: {
+      width: nextWidth,
+      height: nextHeight,
+    },
+  });
 
   if (boundTextElement) {
     boundTextFont = {
@@ -180,10 +200,7 @@ export const resizeElement = (
   }
 
   updateBoundElements(latestElement, elementsMap, {
-    newSize: {
-      width: nextWidth,
-      height: nextHeight,
-    },
+    oldSize: { width: oldWidth, height: oldHeight },
   });
 
   if (boundTextElement && boundTextFont) {
@@ -198,7 +215,9 @@ export const moveElement = (
   newTopLeftX: number,
   newTopLeftY: number,
   originalElement: ExcalidrawElement,
-  elementsMap: ElementsMap,
+  elementsMap: NonDeletedSceneElementsMap,
+  elements: readonly NonDeletedExcalidrawElement[],
+  scene: Scene,
   originalElementsMap: ElementsMap,
   shouldInformMutation = true,
 ) => {
@@ -237,6 +256,7 @@ export const moveElement = (
     },
     shouldInformMutation,
   );
+  updateBindings(latestElement, elementsMap, elements, scene);
 
   const boundTextElement = getBoundTextElement(
     originalElement,
@@ -275,4 +295,28 @@ export const getAtomicUnits = (
       });
     });
   return _atomicUnits;
+};
+
+export const updateBindings = (
+  latestElement: ExcalidrawElement,
+  elementsMap: NonDeletedSceneElementsMap,
+  elements: readonly NonDeletedExcalidrawElement[],
+  scene: Scene,
+  options?: {
+    simultaneouslyUpdated?: readonly ExcalidrawElement[];
+    newSize?: { width: number; height: number };
+  },
+) => {
+  if (isLinearElement(latestElement)) {
+    bindOrUnbindLinearElements(
+      [latestElement],
+      elementsMap,
+      elements,
+      scene,
+      true,
+      [],
+    );
+  } else {
+    updateBoundElements(latestElement, elementsMap, options);
+  }
 };

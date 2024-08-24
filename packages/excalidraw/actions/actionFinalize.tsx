@@ -38,6 +38,7 @@ export const actionFinalize = register({
             startBindingElement,
             endBindingElement,
             elementsMap,
+            scene,
           );
         }
         return {
@@ -49,7 +50,6 @@ export const actionFinalize = register({
             ...appState,
             cursorButton: "up",
             editingLinearElement: null,
-            selectedLinearElement: null,
           },
           storeAction: StoreAction.CAPTURE,
         };
@@ -72,8 +72,8 @@ export const actionFinalize = register({
 
     const multiPointElement = appState.multiElement
       ? appState.multiElement
-      : appState.editingElement?.type === "freedraw"
-      ? appState.editingElement
+      : appState.newElement?.type === "freedraw"
+      ? appState.newElement
       : null;
 
     if (multiPointElement) {
@@ -131,7 +131,13 @@ export const actionFinalize = register({
           -1,
           arrayToMap(elements),
         );
-        maybeBindLinearElement(multiPointElement, appState, { x, y }, app);
+        maybeBindLinearElement(
+          multiPointElement,
+          appState,
+          { x, y },
+          elementsMap,
+          elements,
+        );
       }
     }
 
@@ -169,9 +175,10 @@ export const actionFinalize = register({
             ? appState.activeTool
             : activeTool,
         activeEmbeddable: null,
-        draggingElement: null,
+        newElement: null,
+        selectionElement: null,
         multiElement: null,
-        editingElement: null,
+        editingTextElement: null,
         startBoundElement: null,
         suggestedBindings: [],
         selectedElementIds:
@@ -197,7 +204,7 @@ export const actionFinalize = register({
   keyTest: (event, appState) =>
     (event.key === KEYS.ESCAPE &&
       (appState.editingLinearElement !== null ||
-        (!appState.draggingElement && appState.multiElement === null))) ||
+        (!appState.newElement && appState.multiElement === null))) ||
     ((event.key === KEYS.ESCAPE || event.key === KEYS.ENTER) &&
       appState.multiElement !== null),
   PanelComponent: ({ appState, updateData, data }) => (
