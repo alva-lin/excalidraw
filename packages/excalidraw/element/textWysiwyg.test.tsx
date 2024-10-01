@@ -19,6 +19,7 @@ import type {
 import { API } from "../tests/helpers/api";
 import { getOriginalContainerHeightFromCache } from "./containerCache";
 import { getTextEditor, updateTextEditor } from "../tests/queries/dom";
+import { pointFrom } from "../../math";
 
 // Unmount ReactDOM from root
 ReactDOM.unmountComponentAtNode(document.getElementById("root")!);
@@ -41,10 +42,7 @@ describe("textWysiwyg", () => {
         type: "line",
         width: 100,
         height: 0,
-        points: [
-          [0, 0],
-          [100, 0],
-        ],
+        points: [pointFrom(0, 0), pointFrom(100, 0)],
       });
       const textSize = 20;
       const text = API.createElement({

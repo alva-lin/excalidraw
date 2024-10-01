@@ -11,7 +11,6 @@ import type {
   PointerDownState,
 } from "../types";
 import { getBoundTextElement, getMinTextElementWidth } from "./textElement";
-import { getGridPoint } from "../math";
 import type Scene from "../scene/Scene";
 import {
   isArrowElement,
@@ -21,6 +20,7 @@ import {
 } from "./typeChecks";
 import { getFontString } from "../utils";
 import { TEXT_AUTOWRAP_THRESHOLD } from "../constants";
+import { getGridPoint } from "../snapping";
 
 export const dragSelectedElements = (
   pointerDownState: PointerDownState,
@@ -35,7 +35,6 @@ export const dragSelectedElements = (
 ) => {
   if (
     _selectedElements.length === 1 &&
-    isArrowElement(_selectedElements[0]) &&
     isElbowArrow(_selectedElements[0]) &&
     (_selectedElements[0].startBinding || _selectedElements[0].endBinding)
   ) {
@@ -43,13 +42,7 @@ export const dragSelectedElements = (
   }
 
   const selectedElements = _selectedElements.filter(
-    (el) =>
-      !(
-        isArrowElement(el) &&
-        isElbowArrow(el) &&
-        el.startBinding &&
-        el.endBinding
-      ),
+    (el) => !(isElbowArrow(el) && el.startBinding && el.endBinding),
   );
 
   // we do not want a frame and its elements to be selected at the same time
