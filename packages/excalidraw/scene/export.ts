@@ -9,7 +9,14 @@ import type {
 import type { Bounds } from "../element/bounds";
 import { getCommonBounds, getElementAbsoluteCoords } from "../element/bounds";
 import { renderSceneToSvg } from "../renderer/staticSvgScene";
-import { arrayToMap, distance, getFontString, toBrandedType } from "../utils";
+import {
+  arrayToMap,
+  distance,
+  getFontString,
+  PromisePool,
+  promiseTry,
+  toBrandedType,
+} from "../utils";
 import type { AppState, BinaryFiles } from "../types";
 import {
   DEFAULT_EXPORT_PADDING,
@@ -18,6 +25,9 @@ import {
   SVG_NS,
   THEME,
   THEME_FILTER,
+  FONT_FAMILY_FALLBACKS,
+  getFontFamilyFallbacks,
+  CJK_HAND_DRAWN_FALLBACK_FONT,
 } from "../constants";
 import { getDefaultAppState } from "../appState";
 import { serializeAsJSON } from "../data/json";
@@ -39,6 +49,7 @@ import type { RenderableElementsMap } from "./types";
 import { syncInvalidIndices } from "../fractionalIndex";
 import { renderStaticScene } from "../renderer/staticScene";
 import { Fonts } from "../fonts";
+import { containsCJK } from "../element/textElement";
 
 const SVG_EXPORT_TAG = `<!-- svg-source:excalidraw -->`;
 
@@ -174,7 +185,7 @@ export const exportToCanvas = async (
     return { canvas, scale: appState.exportScale };
   },
   loadFonts: () => Promise<void> = async () => {
-    await Fonts.loadFontsForElements(elements);
+    await Fonts.loadElementsFonts(elements);
   },
 ) => {
   // load font faces before continuing, by default leverages browsers' [FontFace API](https://developer.mozilla.org/en-US/docs/Web/API/FontFace)
@@ -184,6 +195,11 @@ export const exportToCanvas = async (
     exportingFrame ?? null,
     appState.frameRendering ?? null,
   );
+  // for canvas export, don't clip if exporting a specific frame as it would
+  // clip the corners of the content
+  if (exportingFrame) {
+    frameRendering.clip = false;
+  }
 
   const elementsForRender = prepareElementsForRender({
     elements,
@@ -268,6 +284,7 @@ export const exportToSvg = async (
     renderEmbeddables?: boolean;
     exportingFrame?: ExcalidrawFrameLikeElement | null;
     skipInliningFonts?: true;
+    reuseImages?: boolean;
   },
 ): Promise<SVGSVGElement> => {
   const frameRendering = getFrameRenderingConfig(
@@ -350,55 +367,24 @@ export const exportToSvg = async (
     }) rotate(${frame.angle} ${cx} ${cy})"
           width="${frame.width}"
           height="${frame.height}"
+          ${
+            exportingFrame
+              ? ""
+              : `rx=${FRAME_STYLE.radius} ry=${FRAME_STYLE.radius}`
+          }
           >
           </rect>
         </clipPath>`;
   }
 
-  const fontFamilies = elements.reduce((acc, element) => {
-    if (isTextElement(element)) {
-      acc.add(element.fontFamily);
-    }
-
-    return acc;
-  }, new Set<number>());
-
-  const fontFaces = opts?.skipInliningFonts
-    ? []
-    : await Promise.all(
-        Array.from(fontFamilies).map(async (x) => {
-          const { fonts, metadata } = Fonts.registered.get(x) ?? {};
-
-          if (!Array.isArray(fonts)) {
-            console.error(
-              `Couldn't find registered fonts for font-family "${x}"`,
-              Fonts.registered,
-            );
-            return;
-          }
-
-          if (metadata?.local) {
-            // don't inline local fonts
-            return;
-          }
-
-          return Promise.all(
-            fonts.map(
-              async (font) => `@font-face {
-        font-family: ${font.fontFace.family};
-        src: url(${await font.getContent()});
-          }`,
-            ),
-          );
-        }),
-      );
+  const fontFaces = opts?.skipInliningFonts ? [] : await getFontFaces(elements);
+  const delimiter = "\n      "; // 6 spaces
 
   svgRoot.innerHTML = `
   ${SVG_EXPORT_TAG}
   ${metadata}
   <defs>
-    <style class="style-fonts">
-      ${fontFaces.flat().filter(Boolean).join("\n")}
+    <style class="style-fonts">${delimiter}${fontFaces.join(delimiter)}
     </style>
     ${exportingFrameClipPath}
   </defs>
@@ -440,6 +426,7 @@ export const exportToSvg = async (
               .map((element) => [element.id, true]),
           )
         : new Map(),
+      reuseImages: opts?.reuseImages ?? true,
     },
   );
 
@@ -469,3 +456,111 @@ export const getExportSize = (
 
   return [width, height];
 };
+
+const getFontFaces = async (
+  elements: readonly ExcalidrawElement[],
+): Promise<string[]> => {
+  const fontFamilies = new Set<number>();
+  const charsPerFamily: Record<number, Set<string>> = {};
+
+  for (const element of elements) {
+    if (!isTextElement(element)) {
+      continue;
+    }
+
+    fontFamilies.add(element.fontFamily);
+
+    // gather unique codepoints only when inlining fonts
+    for (const char of element.originalText) {
+      if (!charsPerFamily[element.fontFamily]) {
+        charsPerFamily[element.fontFamily] = new Set();
+      }
+
+      charsPerFamily[element.fontFamily].add(char);
+    }
+  }
+
+  const orderedFamilies = Array.from(fontFamilies);
+
+  // for simplicity, assuming we have just one family with the CJK handdrawn fallback
+  const familyWithCJK = orderedFamilies.find((x) =>
+    getFontFamilyFallbacks(x).includes(CJK_HAND_DRAWN_FALLBACK_FONT),
+  );
+
+  if (familyWithCJK) {
+    const characters = getChars(charsPerFamily[familyWithCJK]);
+
+    if (containsCJK(characters)) {
+      const family = FONT_FAMILY_FALLBACKS[CJK_HAND_DRAWN_FALLBACK_FONT];
+
+      // adding the same characters to the CJK handrawn family
+      charsPerFamily[family] = new Set(characters);
+
+      // the order between the families and fallbacks is important, as fallbacks need to be defined first and in the reversed order
+      // so that they get overriden with the later defined font faces, i.e. in case they share some codepoints
+      orderedFamilies.unshift(
+        FONT_FAMILY_FALLBACKS[CJK_HAND_DRAWN_FALLBACK_FONT],
+      );
+    }
+  }
+
+  const iterator = fontFacesIterator(orderedFamilies, charsPerFamily);
+
+  // don't trigger hundreds of concurrent requests (each performing fetch, creating a worker, etc.),
+  // instead go three requests at a time, in a controlled manner, without completely blocking the main thread
+  // and avoiding potential issues such as rate limits
+  const concurrency = 3;
+  const fontFaces = await new PromisePool(iterator, concurrency).all();
+
+  // dedup just in case (i.e. could be the same font faces with 0 glyphs)
+  return Array.from(new Set(fontFaces));
+};
+
+function* fontFacesIterator(
+  families: Array<number>,
+  charsPerFamily: Record<number, Set<string>>,
+): Generator<Promise<void | readonly [number, string]>> {
+  for (const [familyIndex, family] of families.entries()) {
+    const { fontFaces, metadata } = Fonts.registered.get(family) ?? {};
+
+    if (!Array.isArray(fontFaces)) {
+      console.error(
+        `Couldn't find registered fonts for font-family "${family}"`,
+        Fonts.registered,
+      );
+      continue;
+    }
+
+    if (metadata?.local) {
+      // don't inline local fonts
+      continue;
+    }
+
+    for (const [fontFaceIndex, fontFace] of fontFaces.entries()) {
+      yield promiseTry(async () => {
+        try {
+          const characters = getChars(charsPerFamily[family]);
+          const fontFaceCSS = await fontFace.toCSS(characters);
+
+          if (!fontFaceCSS) {
+            return;
+          }
+
+          // giving a buffer of 10K font faces per family
+          const fontFaceOrder = familyIndex * 10_000 + fontFaceIndex;
+          const fontFaceTuple = [fontFaceOrder, fontFaceCSS] as const;
+
+          return fontFaceTuple;
+        } catch (error) {
+          console.error(
+            `Couldn't transform font-face to css for family "${fontFace.fontFace.family}"`,
+            error,
+          );
+        }
+      });
+    }
+  }
+}
+
+const getChars = (characterSet: Set<string>) =>
+  Array.from(characterSet).join("");

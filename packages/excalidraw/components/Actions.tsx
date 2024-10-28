@@ -26,6 +26,7 @@ import { trackEvent } from "../analytics";
 import {
   hasBoundTextElement,
   isElbowArrow,
+  isImageElement,
   isLinearElement,
   isTextElement,
 } from "../element/typeChecks";
@@ -49,6 +50,7 @@ import {
 } from "./icons";
 import { KEYS } from "../keys";
 import { useTunnels } from "../context/tunnels";
+import { CLASSES } from "../constants";
 
 export const canChangeStrokeColor = (
   appState: UIAppState,
@@ -125,6 +127,11 @@ export const SelectedShapeActions = ({
     targetElements.length === 1 &&
     isLinearElement(targetElements[0]) &&
     !isElbowArrow(targetElements[0]);
+
+  const showCropEditorAction =
+    !appState.croppingElementId &&
+    targetElements.length === 1 &&
+    isImageElement(targetElements[0]);
 
   return (
     <div className="panelColumn">
@@ -244,6 +251,7 @@ export const SelectedShapeActions = ({
             {renderAction("group")}
             {renderAction("ungroup")}
             {showLinkIcon && renderAction("hyperlink")}
+            {showCropEditorAction && renderAction("cropEditor")}
             {showLineEditorAction && renderAction("toggleLinearEditor")}
           </div>
         </fieldset>
@@ -426,7 +434,7 @@ export const ZoomActions = ({
   renderAction: ActionManager["renderAction"];
   zoom: Zoom;
 }) => (
-  <Stack.Col gap={1} className="zoom-actions">
+  <Stack.Col gap={1} className={CLASSES.ZOOM_ACTIONS}>
     <Stack.Row align="center">
       {renderAction("zoomOut")}
       {renderAction("resetZoom")}
